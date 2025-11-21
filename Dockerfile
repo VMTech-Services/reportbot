@@ -1,5 +1,5 @@
 FROM node:24.5.0-alpine
-RUN apt-get update && apt-get install -y nut-client
+RUN apt update && apt install -y nut-client
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
