@@ -25,12 +25,12 @@ class UPSWatcher {
 
     static async getUpsStatus() {
         const upsName = this.getUpsName();
-        const status = await this.execUpsCommand(`upsc ${upsName}`);
-        const lines = status.split("\n");
+        const statusRaw = await this.execUpsCommand(`upsc ${upsName}`);
+        const lines = statusRaw.split("\n");
         const data = {};
         for (const line of lines) {
             const [key, value] = line.split(":").map(s => s.trim());
-            data[key] = value;
+            if (key) data[key] = value;
         }
         return data;
     }
@@ -38,24 +38,22 @@ class UPSWatcher {
     static async checkUps() {
         try {
             const data = await this.getUpsStatus();
-            const state = (data.status === "OB") ? "onbattery" : "online";
-            const charge = parseFloat(data.battery.charge || data.battery_charge || 0);
-            const minCharge = parseFloat(data.battery.runtime_low || data.battery.runtime || 0);
+            const state = data.status === "OB" ? "onbattery" : "online";
+            const charge = parseFloat(data["battery.charge"] || data["battery.charge.low"] || 0);
+            const minCharge = parseFloat(data["battery.runtime.low"] || data["battery.runtime"] || 0);
             const now = new Date();
 
             let messageText;
-
             if (state === "onbattery") {
                 messageText = `🔴 ${process.env.DEPLOYNAME} power outage detected!\nCharge: ${charge}% / min ${minCharge}%\n[${formatDate(now.toISOString())}]`;
             } else {
                 messageText = `🟢 ${process.env.DEPLOYNAME} power restored\nCharge: ${charge}%\n[${formatDate(now.toISOString())}]`;
             }
 
-            let internalId;
             if (this.lastInternalId) {
-                internalId = await Director.editInternalMessage(this.lastInternalId, messageText);
+                await Director.editInternalMessage(this.lastInternalId, messageText);
             } else {
-                internalId = await Director.broadcastMessage(messageText);
+                const internalId = await Director.broadcastMessage(messageText);
                 this.lastInternalId = internalId;
             }
 
@@ -64,7 +62,7 @@ class UPSWatcher {
                     type: "ups",
                     action: state,
                     data: { charge, minCharge },
-                    internalMessageID: internalId
+                    internalMessageID: this.lastInternalId
                 }
             });
 

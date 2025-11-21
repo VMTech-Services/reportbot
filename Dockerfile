@@ -1,5 +1,4 @@
 FROM node:24.5.0-alpine
-RUN apk add --no-cache bash nut-client
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
