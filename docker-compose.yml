@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   app:
     build: .
@@ -12,3 +10,5 @@ services:
       - TGBOTKEY=${TGBOTKEY}
     volumes:
       - ./storage.db:/prisma/storage.db
+      - /etc/nut:/etc/nut:ro
+      - /var/run/nut:/var/run/nut:rw
