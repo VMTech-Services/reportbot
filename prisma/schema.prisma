@@ -1,0 +1,93 @@
+datasource db {
+    provider = "sqlite"
+    url      = env("DATABASE_URL")
+}
+
+generator client {
+    provider = "prisma-client-js"
+}
+
+model User {
+    id        String   @id @unique @default(uuid())
+    username  String   @unique
+    password  String
+    isAdmin   Boolean  @default(false)
+    createdAt DateTime @default(now())
+
+    tgIds TgAccount[]
+}
+
+model TgAccount {
+    id Int @id @default(autoincrement())
+
+    tgId String @unique
+
+    userId String
+    user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model InternalMessage {
+    id        String   @id @unique @default(uuid())
+    createdAt DateTime @default(now())
+    updatedAt DateTime @default(now()) @updatedAt
+    content   Json?
+
+    logs Log[]
+
+    tgMessages tgMessage[]
+}
+
+model tgMessage {
+    id     String    @id @unique @default(uuid())
+    chatID String
+    chat   tgChannel @relation(fields: [chatID], references: [id])
+
+    internalMsgID String
+    internalMsg   InternalMessage @relation(fields: [internalMsgID], references: [id])
+
+    tgData Json?
+}
+
+model tgChannel {
+    id String @id @unique @default(uuid())
+
+    tgChatID        String   @unique
+    addedOn         DateTime @default(now())
+    settingsUpdates DateTime @default(now()) @updatedAt()
+
+    chatData Json?
+
+    messages tgMessage[]
+}
+
+model Log {
+    id     String   @id @default(uuid())
+    type   String
+    action String
+    data   Json?
+    time   DateTime @default(now())
+
+    internalMessageID String
+    internalMessage   InternalMessage @relation(fields: [internalMessageID], references: [id])
+}
+
+model DailyReport {
+    id        String   @id @default(uuid())
+    date      DateTime @unique
+    content   Json
+    createdAt DateTime @default(now())
+}
+
+model WeeklyReport {
+    id        String   @id @default(uuid())
+    date      DateTime @unique
+    content   Json
+    createdAt DateTime @default(now())
+}
+
+model MonthlyReport {
+    id        String   @id @default(uuid())
+    date      DateTime @unique
+    content   Json
+    createdAt DateTime @default(now())
+}

@@ -1,0 +1,14 @@
+version: "3.9"
+
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    network_mode: "host"
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - SALTROUNDS=${SALTROUNDS}
+      - DEPLOYNAME=${DEPLOYNAME}
+      - TGBOTKEY=${TGBOTKEY}
+    volumes:
+      - ./storage.db:/prisma/storage.db

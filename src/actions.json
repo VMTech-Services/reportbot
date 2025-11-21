@@ -1,0 +1,24 @@
+{
+    "system": [
+        "up",
+        "shudown",
+        "restart"
+    ],
+    "power": [
+        "loss",
+        "online",
+        "low",
+        "down"
+    ],
+    "network": [
+        "down",
+        "up"
+    ],
+    "docker": [
+        "running",
+        "unhealthy",
+        "restarting",
+        "stopped",
+        "removed"
+    ]
+}
