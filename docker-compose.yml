@@ -8,6 +8,7 @@ services:
       - SALTROUNDS=${SALTROUNDS}
       - DEPLOYNAME=${DEPLOYNAME}
       - TGBOTKEY=${TGBOTKEY}
+      - NUTUPSNAME=${NUTUPSNAME}
     volumes:
       - ./storage.db:/prisma/storage.db
       - /etc/nut:/etc/nut:ro
