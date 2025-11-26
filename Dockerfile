@@ -7,4 +7,4 @@ COPY prisma ./prisma
 RUN npx prisma generate
 COPY . .
 RUN chmod +x start.sh
-ENTRYPOINT [ "./start.sh" ]
+CMD ["sh", "./start.sh"]
