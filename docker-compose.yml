@@ -4,6 +4,7 @@ services:
     restart: unless-stopped
     network_mode: "host"
     environment:
+      - TZ=Europe/Kyiv
       - DATABASE_URL=${DATABASE_URL}
       - SALTROUNDS=${SALTROUNDS}
       - DEPLOYNAME=${DEPLOYNAME}
