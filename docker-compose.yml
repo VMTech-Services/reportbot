@@ -10,5 +10,5 @@ services:
       - TGBOTKEY=${TGBOTKEY}
       - NUTUPSNAME=${NUTUPSNAME}
     volumes:
-      - ./storage.db:/prisma/storage.db
+      - ./storage.db:/app/prisma/storage.db
       - /var/run/nut:/var/run/nut:ro
