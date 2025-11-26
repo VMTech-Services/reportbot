@@ -121,10 +121,10 @@ bot.command("register", async (ctx) => {
             tgIds: {
                 connectOrCreate: {
                     where: {
-                        tgId: ctx.update.message.from.id
+                        tgId: String(ctx.update.message.from.id)
                     },
                     create: {
-                        tgId: ctx.update.message.from.id
+                        tgId: String(ctx.update.message.from.id)
                     }
                 }
             }
