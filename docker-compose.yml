@@ -11,6 +11,4 @@ services:
       - NUTUPSNAME=${NUTUPSNAME}
     volumes:
       - ./storage.db:/prisma/storage.db
-      - /etc/nut:/etc/nut:ro
-      - /var/run/nut:/var/run/nut:rw
-      - /usr/bin/upsc:/usr/bin/upsc:ro
+      - /var/run/nut:/var/run/nut:ro
