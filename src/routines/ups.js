@@ -113,30 +113,34 @@ class UPSWatcher {
             else state = "online";
 
             if (state === "loss") {
-                if (this.lastState === "loss" || (this.lastState === "online" && this.lastCharge < 100)) {
+                if (!this.lastState || this.lastState === "online") {
                     statusData.messageText = this.buildMessage("loss", statusData);
                     await this.recordLog("loss", statusData);
-                } else {
-                    this.lastCharge = charge;
+                } else if (this.lastState === "loss") {
                     statusData.messageText = this.buildMessage("loss", statusData);
                     await this.recordLog("loss", statusData);
                 }
                 this.lastState = "loss";
             } else if (state === "online") {
-                statusData.messageText = this.buildMessage("online", statusData);
-                await this.recordLog("online", statusData);
+                if (this.lastState === "loss") {
+                    statusData.messageText = this.buildMessage("online", statusData);
+                    await this.recordLog("online", statusData);
+                    this.lastState = "online";
+                }
+
+                if (this.lastState === "online" && charge < 100) {
+                    statusData.messageText = this.buildMessage("online", statusData);
+                    await this.recordLog("online", statusData);
+                }
 
                 if (charge >= 100) {
                     this.lastInternalId = null;
                     this.lastState = null;
                     this.lastCharge = null;
-                } else {
-                    this.lastCharge = charge;
-                    this.lastState = "online";
                 }
             }
 
-            if (this.lastCharge !== charge) {
+            if (this.lastCharge !== charge || this.lastState !== state) {
                 this.log(`UPS state: ${state}, charge: ${charge}%`);
             }
 
@@ -146,7 +150,7 @@ class UPSWatcher {
             this.log("checkUps error:", err);
         }
     }
-
+    
     static async setup(intervalMs = 5000) {
         await this.getLastLog();
         try { await this.getUpsStatus(); }
