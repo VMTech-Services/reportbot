@@ -1,14 +1,14 @@
-// dockerMonitor.js
+// dockerMonitorRealtime.js
 const Docker = require("dockerode");
 const prisma = require("../prisma");
 const Director = require("../director");
 const formatDate = require("../scripts/formatDate");
 const fs = require("fs");
 
-class DockerMonitor {
+class DockerMonitorRealtime {
     static docker = null;
-    static containers = {}; // key = containerId, value = { info, status }
-    static internalId = null; // для редактирования единого сообщения
+    static containers = {};
+    static internalId = null;
     static listening = false;
 
     static statusMap(state) {
@@ -17,11 +17,12 @@ class DockerMonitor {
         if (state === "restarting") return "restarting";
         if (state === "exited") return "stopped";
         if (state === "dead") return "removed";
+        if (state === "unhealthy") return "unhealthy";
         return state;
     }
 
     static async record(container, status) {
-        return prisma.log.create({
+        await prisma.log.create({
             data: {
                 type: "docker",
                 action: status,
@@ -53,9 +54,9 @@ class DockerMonitor {
     }
 
     static formatMessage() {
-        const all = Object.values(this.containers);
+        const all = Object.values(this.containers).map(c => c.info);
 
-        const { groups, singles } = this.groupContainers(all.map(c => c.info));
+        const { groups, singles } = this.groupContainers(all);
 
         let msg = `🐳 Docker containers status\n[${formatDate(new Date())}]\n\n`;
 
@@ -80,67 +81,109 @@ class DockerMonitor {
     }
 
     static async updateMessage() {
-        const text = this.formatMessage();
-        if (this.internalId) {
-            await Director.editInternalMessage(this.internalId, text);
-        } else {
-            this.internalId = await Director.broadcastMessage(text);
+        if (Object.values(this.containers).length === 0) return;
+
+        const allRunningHealthy = Object.values(this.containers).every(c =>
+            c.status === "running" || c.status === "healthy"
+        );
+
+        if (allRunningHealthy && this.internalId) {
+            console.log("DockerMonitor: all containers running, clearing message");
+            this.internalId = null;
+        }
+
+        if (!allRunningHealthy || !this.internalId) {
+            const text = this.formatMessage();
+            if (this.internalId) {
+                await Director.editInternalMessage(this.internalId, text);
+            } else {
+                this.internalId = await Director.broadcastMessage(text);
+            }
         }
     }
 
     static async scanContainers() {
-        const list = await this.docker.listContainers({ all: true });
-        let changed = false;
+        try {
+            const list = await this.docker.listContainers({ all: true });
+            let changed = false;
 
-        for (const c of list) {
-            const status = this.statusMap(c.State);
-
-            if (!this.containers[c.Id]) {
-                this.containers[c.Id] = { info: c, status };
-                changed = true;
-                await this.record(c, status);
-            } else if (this.containers[c.Id].status !== status) {
-                this.containers[c.Id].status = status;
-                changed = true;
-                await this.record(c, status);
+            for (const c of list) {
+                const status = this.statusMap(c.State);
+                if (!this.containers[c.Id]) {
+                    this.containers[c.Id] = { info: c, status };
+                    changed = true;
+                    await this.record(c, status);
+                } else if (this.containers[c.Id].status !== status) {
+                    this.containers[c.Id].status = status;
+                    changed = true;
+                    await this.record(c, status);
+                }
             }
-        }
 
-        // проверяем удалённые контейнеры
-        for (const id of Object.keys(this.containers)) {
-            if (!list.find(c => c.Id === id)) {
-                this.containers[id].status = "removed";
-                changed = true;
-                await this.record(this.containers[id].info, "removed");
+            for (const id of Object.keys(this.containers)) {
+                if (!list.find(c => c.Id === id)) {
+                    this.containers[id].status = "removed";
+                    changed = true;
+                    await this.record(this.containers[id].info, "removed");
+                }
             }
-        }
 
-        if (changed) {
-            await this.updateMessage();
+            if (changed) await this.updateMessage();
+        } catch (e) {
+            console.error("DockerMonitor scan error:", e);
         }
     }
 
     static async handleEvent(evt) {
-        const { Type, Actor } = evt;
-        if (Type !== "container") return;
+        if (evt.Type !== "container") return;
 
-        const containerId = Actor?.ID;
-        const cInfo = await this.docker.getContainer(containerId).inspect().catch(() => null);
-        if (!cInfo) return;
+        const containerId = evt.Actor?.ID;
+        if (!containerId) return;
 
-        const status = this.statusMap(cInfo.State?.Status);
-        this.containers[containerId] = { info: cInfo, status };
+        const container = this.docker.getContainer(containerId);
+        const info = await container.inspect().catch(() => null);
+        if (!info) return;
 
-        await this.record(cInfo, status);
+        const status = this.statusMap(info.State?.Status);
+        this.containers[containerId] = { info, status };
+
+        await this.record(info, status);
         await this.updateMessage();
     }
 
-    static async checkDockerAvailable() {
-        // проверяем сокет Docker
-        const socketExists = fs.existsSync("/var/run/docker.sock");
-        if (!socketExists) return false;
+    static async listenDockerEvents() {
+        try {
+            const stream = await this.docker.getEvents();
+            stream.on("data", chunk => {
+                const lines = chunk.toString("utf8").split("\n").filter(Boolean);
+                for (const line of lines) {
+                    try {
+                        const evt = JSON.parse(line);
+                        this.handleEvent(evt);
+                    } catch (e) {
+                        console.error("DockerMonitor: failed to parse event", e);
+                    }
+                }
+            });
 
-        // пробуем создать Docker объект и вызвать version
+            stream.on("error", err => {
+                console.error("DockerMonitor: event stream error", err);
+                setTimeout(() => this.listenDockerEvents(), 5000);
+            });
+
+            stream.on("end", () => {
+                console.warn("DockerMonitor: event stream ended");
+                setTimeout(() => this.listenDockerEvents(), 3000);
+            });
+        } catch (err) {
+            console.error("DockerMonitor: cannot connect to Docker events:", err);
+            setTimeout(() => this.listenDockerEvents(), 5000);
+        }
+    }
+
+    static async checkDockerAvailable() {
+        if (!fs.existsSync("/var/run/docker.sock")) return false;
+
         try {
             const docker = new Docker({ socketPath: "/var/run/docker.sock" });
             await docker.version();
@@ -160,40 +203,18 @@ class DockerMonitor {
         }
 
         console.log("DockerMonitor: starting...");
-        await this.scanContainers(); // стартовое сообщение
 
-        if (this.listening) return;
-        this.listening = true;
+        await this.scanContainers();
 
-        const stream = await this.docker.getEvents();
-        stream.on("data", chunk => {
-            const lines = chunk.toString("utf8").split("\n").filter(Boolean);
-            for (const line of lines) {
-                try {
-                    const evt = JSON.parse(line);
-                    this.handleEvent(evt);
-                } catch (e) {
-                    console.error("DockerMonitor: event parse error", e);
-                }
-            }
-        });
+        if (!this.listening) {
+            this.listening = true;
+            this.listenDockerEvents();
+        }
 
-        stream.on("error", err => {
-            console.error("DockerMonitor: event stream error", err);
-            setTimeout(() => this.start(), 5000);
-        });
-
-        stream.on("end", () => {
-            console.warn("DockerMonitor: event stream ended");
-            setTimeout(() => this.start(), 3000);
-        });
-
-        // периодический скан на случай пропущенных событий
         setInterval(() => this.scanContainers(), 10000);
     }
 }
 
-module.exports = DockerMonitor;
+module.exports = DockerMonitorRealtime;
 
-// автозапуск
-DockerMonitor.start();
+DockerMonitorRealtime.start();
