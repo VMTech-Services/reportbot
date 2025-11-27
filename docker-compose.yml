@@ -13,3 +13,4 @@ services:
     volumes:
       - ./storage.db:/app/prisma/storage.db
       - /var/run/nut:/var/run/nut:ro
+      - /var/run/docker.sock:/var/run/docker.sock
