@@ -1,7 +1,6 @@
 // systemWatcher.js
 const prisma = require("../prisma");
 const Director = require("../director");
-const actions = require("../actions.json")
 const formatDate = require("../scripts/formatDate")
 
 class SystemWatcher {
@@ -21,7 +20,7 @@ class SystemWatcher {
         let internalId
 
         if (previousState) {
-            const result = await Director.editInternalMessage(previousState.internalMessageID, `🔴 ${process.env.DEPLOYNAME} shutting down.\n[${formatDate(previousState.time)}]\n\n🟢 Back up and running.\n[${formatDate(new Date().toISOString())}]`)
+            const result = await Director.editInternalMessage(previousState.internalMessageID, `🟢 Back up and running.\n[${formatDate(new Date().toISOString())}]\n\n🔴 ${process.env.DEPLOYNAME} shutting down.\n[${formatDate(previousState.time)}]`)
             internalId = result;
         } else {
             const result = await Director.broadcastMessage(`🟢 ${process.env.DEPLOYNAME} is up and running.\n[${formatDate(new Date().toISOString())}]`);

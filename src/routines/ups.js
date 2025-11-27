@@ -7,6 +7,7 @@ const formatDate = require("../scripts/formatDate");
 class UPSWatcher {
     static lastInternalId = null;
     static lastState = null;
+    static intervalHandle = null;
 
     static getUpsName() {
         if (!process.env.NUTUPSNAME) {
@@ -35,6 +36,9 @@ class UPSWatcher {
             const value = rest.join(":").trim();
             data[key.trim()] = value;
         }
+        if (Object.keys(data).length === 0) {
+            throw new Error("Empty UPS status returned");
+        }
         return data;
     }
 
@@ -46,11 +50,18 @@ class UPSWatcher {
 
         const header = `🔔 ${process.env.DEPLOYNAME} UPS history\n\n`;
         const lines = logs.map((l) => {
-            const time = formatDate(l.time.toISOString ? l.time.toISOString() : new Date(l.time).toISOString());
+            const time = formatDate(l.time);
             if (l.type === "ups") {
-                const action = l.action === "onbattery" ? "🔴 power lost" :
-                    l.action === "online" ? "🟢 power restored" : l.action;
-                const charge = l.data && typeof l.data.charge !== "undefined" ? ` — Charge: ${l.data.charge}%` : "";
+                const action =
+                    l.action === "onbattery"
+                        ? "🔴 power lost"
+                        : l.action === "online"
+                            ? "🟢 power restored"
+                            : l.action;
+                const charge =
+                    l.data && typeof l.data.charge !== "undefined"
+                        ? ` — Charge: ${l.data.charge}%`
+                        : "";
                 return `${action} ${charge}\n[${time}]`;
             } else {
                 return `${l.action}\n[${time}]`;
@@ -74,7 +85,7 @@ class UPSWatcher {
 
     static async createBroadcastForOutage(charge, minCharge) {
         const now = new Date();
-        const messageText = `🔴 ${process.env.DEPLOYNAME} power outage detected!\nCharge: ${charge}% / min ${minCharge}%\n[${formatDate(now.toISOString())}]`;
+        const messageText = `🔴 ${process.env.DEPLOYNAME} power outage detected!\nCharge: ${charge}% / min ${minCharge}%\n[${formatDate(now)}]`;
         const internalId = await Director.broadcastMessage(messageText);
         await this.recordLog("onbattery", { charge, minCharge }, internalId);
         this.lastInternalId = internalId;
@@ -91,8 +102,12 @@ class UPSWatcher {
         try {
             const data = await this.getUpsStatus();
             const state = data.status === "OB" ? "onbattery" : "online";
-            const charge = parseFloat(data["battery.charge"] ?? data["battery.charge.low"] ?? 0) || 0;
-            const minCharge = parseFloat(data["battery.runtime.low"] ?? data["battery.runtime"] ?? 0) || 0;
+            const charge = parseFloat(
+                data["battery.charge"] ?? data["battery.charge.low"] ?? 0
+            ) || 0;
+            const minCharge =
+                parseFloat(data["battery.runtime.low"] ?? data["battery.runtime"] ?? 0) ||
+                0;
             const now = new Date();
 
             if (this.lastState === null) {
@@ -119,56 +134,72 @@ class UPSWatcher {
                         await this.createBroadcastForOutage(charge, minCharge);
                     }
                 }
-            }
-
-            else if (state === "online" && this.lastState === "onbattery") {
+            } else if (state === "online" && this.lastState === "onbattery") {
                 if (this.lastInternalId) {
                     await this.recordLog("online", { charge, minCharge }, this.lastInternalId);
                     await this.editMessageFromLogs(this.lastInternalId);
                 } else {
-                    const messageText = `🟢 ${process.env.DEPLOYNAME} power restored\nCharge: ${charge}%\n[${formatDate(now.toISOString())}]`;
+                    const messageText = `🟢 ${process.env.DEPLOYNAME} power restored\nCharge: ${charge}%\n[${formatDate(now)}]`;
                     const internalId = await Director.broadcastMessage(messageText);
                     await this.recordLog("online", { charge, minCharge }, internalId);
                     this.lastInternalId = internalId;
                 }
-            }
-
-            else if (state === "onbattery" && this.lastState === "onbattery") {
+            } else if (state === "onbattery" && this.lastState === "onbattery") {
                 if (this.lastInternalId) {
                     await this.recordLog("onbattery_sample", { charge, minCharge }, this.lastInternalId);
                     await this.editMessageFromLogs(this.lastInternalId);
                 }
             }
 
-            if (!(state === "onbattery" && this.lastState !== "onbattery") &&
-                !(state === "online" && this.lastState === "onbattery")) {
+            if (
+                !(state === "onbattery" && this.lastState !== "onbattery") &&
+                !(state === "online" && this.lastState === "onbattery")
+            ) {
                 await this.recordLog(state, { charge, minCharge }, this.lastInternalId);
             }
 
             this.lastState = state;
         } catch (err) {
-            console.error("UPSWatcher error:", err);
+            console.error("UPSWatcher error during checkUps:", err);
         }
     }
 
-    static setup(intervalMs = 5000) {
-        console.log("UPSWatcher: monitoring started");
-        (async () => {
-            try {
-                const lastLog = await prisma.log.findFirst({
-                    where: { type: "ups" },
-                    orderBy: { time: "desc" },
-                });
-                if (lastLog) {
-                    this.lastState = lastLog.action === "onbattery" ? "onbattery" : "online";
-                    this.lastInternalId = lastLog.internalMessageID || null;
-                }
-            } catch (e) {
+    static async setup(intervalMs = 5000) {
+        try {
+            const probe = await this.getUpsStatus();
+
+            if (!probe || Object.keys(probe).length === 0) {
+                console.error("UPSWatcher: probe returned empty data — not starting UPSWatcher");
+                return false;
             }
+        } catch (err) {
+            console.error("UPSWatcher: failed to probe UPS on startup — not starting UPSWatcher:", err.message || err);
+            return false;
+        }
+
+        try {
+            const lastLog = await prisma.log.findFirst({
+                where: { type: "ups" },
+                orderBy: { time: "desc" },
+            });
+            if (lastLog) {
+                this.lastState = lastLog.action === "onbattery" ? "onbattery" : "online";
+                this.lastInternalId = lastLog.internalMessageID || null;
+            }
+        } catch (e) {
+            console.error("UPSWatcher: failed to read last log (continuing):", e);
+        }
+
+        try {
             await this.checkUps();
-            setInterval(() => this.checkUps(), intervalMs);
-        })().catch((e) => console.error("UPSWatcher init error:", e));
+            this.intervalHandle = setInterval(() => this.checkUps(), intervalMs);
+            console.log("UPSWatcher: monitoring started");
+            return true;
+        } catch (e) {
+            console.error("UPSWatcher: failed to start periodic checks:", e);
+            return false;
+        }
     }
 }
 
-module.exports = UPSWatcher;
+UPSWatcher.setup()
