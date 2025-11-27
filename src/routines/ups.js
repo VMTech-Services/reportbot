@@ -21,10 +21,7 @@ class UPSWatcher {
         this.log("Executing command:", cmd);
         return new Promise((resolve, reject) => {
             exec(cmd, { timeout: 10_000 }, (err, stdout, stderr) => {
-                if (err) {
-                    this.log("Command error:", err.message || err);
-                    return reject(err);
-                }
+                if (err) return reject(err);
                 if (stderr) this.log("Command stderr:", stderr.trim());
                 resolve(stdout ? stdout.trim() : "");
             });
@@ -32,150 +29,82 @@ class UPSWatcher {
     }
 
     static async getUpsStatus() {
-        try {
-            const upsName = this.getUpsName();
-            const statusRaw = await this.execUpsCommand(`upsc ${upsName}`);
-            this.log("Raw UPS status:", statusRaw);
-            const lines = statusRaw.split(/\r?\n/);
-            const data = {};
-            for (const line of lines) {
-                if (!line.includes(":")) continue;
-                const [key, ...rest] = line.split(":");
-                const k = key?.trim();
-                const v = rest.join(":").trim();
-                if (k) data[k] = v;
-            }
-            this.log("Parsed UPS data:", data);
-            if (Object.keys(data).length === 0) throw new Error("Empty UPS status returned");
-            return data;
-        } catch (err) {
-            this.log("getUpsStatus error:", err);
-            throw err;
-        }
+        const raw = await this.execUpsCommand(`upsc ${this.getUpsName()}`);
+        const data = {};
+        raw.split(/\r?\n/).forEach(line => {
+            const [k, ...rest] = line.split(":");
+            if (k) data[k.trim()] = rest.join(":").trim();
+        });
+        if (!Object.keys(data).length) throw new Error("Empty UPS status returned");
+        return data;
     }
 
-    static _fmtVal(v, suffix = "") {
-        if (v === null || typeof v === "undefined" || v === "") return `N/A`;
-        return `${v}${suffix}`;
+    static _fmt(v, suffix = "") {
+        return (v === null || v === undefined || v === "") ? "N/A" : `${v}${suffix}`;
     }
 
-    static _parseNumberRaw(v) {
+    static _num(v) {
         if (v === undefined || v === null) return null;
-        const s = String(v).trim();
-        const num = parseFloat(s.replace(/[^0-9.\-]/g, ""));
-        return Number.isFinite(num) ? num : null;
+        const n = parseFloat(String(v).replace(/[^0-9.\-]/g, ""));
+        return Number.isFinite(n) ? n : null;
     }
 
-    static async recordLog(action, data = {}, internalMessageID = null) {
-        try {
-            const rec = await prisma.log.create({
-                data: { type: "ups", action, data, internalMessageID },
-            });
-            this.log(`Recorded log: ${action}, internalMessageID: ${internalMessageID}`);
-            return rec;
-        } catch (err) {
-            this.log("recordLog failed:", err);
-            return null;
+    static async recordLog(action, data = {}) {
+        const internalId = await Director.broadcastMessage(data.messageText || "");
+        await prisma.log.create({ data: { type: "ups", action, data, internalMessageID: internalId } });
+        this.lastInternalId = internalId;
+        return internalId;
+    }
+
+    static async broadcast(status, statusData) {
+        const now = new Date();
+        let icon, text;
+        switch (status) {
+            case "loss":
+                icon = "🔴"; text = "power outage detected!"; break;
+            case "online":
+                icon = "🟢"; text = "power restored"; break;
+            case "low":
+                icon = "⚠️"; text = "battery low"; break;
+            case "down":
+                icon = "❌"; text = "battery critical! Shutdown imminent"; break;
         }
-    }
-
-    static async createBroadcastForOutage(statusData) {
-        this.log("Creating broadcast for power outage:", statusData);
-        const now = new Date();
-        const messageText =
-            `🔴 ${process.env.DEPLOYNAME} — power outage detected!\n` +
-            `Charge: ${this._fmtVal(statusData.charge, "%")} · Est. runtime: ${this._fmtVal(statusData.runtime, "s")}\n` +
-            `Vin: ${this._fmtVal(statusData.inputVoltage, "V")} · Vout: ${this._fmtVal(statusData.outputVoltage, "V")} · Load: ${this._fmtVal(statusData.loadPct, "%")}\n` +
+        const messageText = `${icon} ${process.env.DEPLOYNAME} — ${text}\n` +
+            `Charge: ${this._fmt(statusData.charge, "%")} · Runtime: ${this._fmt(statusData.runtime, "s")}\n` +
+            `Vin: ${this._fmt(statusData.inputVoltage, "V")} · Vout: ${this._fmt(statusData.outputVoltage, "V")} · Load: ${this._fmt(statusData.loadPct, "%")}\n` +
             `[${formatDate(now)}]`;
-        const internalId = await Director.broadcastMessage(messageText);
-        await this.recordLog("loss", statusData, internalId);
-        this.lastInternalId = internalId;
-        return internalId;
-    }
-
-    static async createBroadcastForRestore(statusData) {
-        this.log("Creating broadcast for power restore:", statusData);
-        const now = new Date();
-        const messageText =
-            `🟢 ${process.env.DEPLOYNAME} — power restored\n` +
-            `Charge: ${this._fmtVal(statusData.charge, "%")} · Vin: ${this._fmtVal(statusData.inputVoltage, "V")} · Vout: ${this._fmtVal(statusData.outputVoltage, "V")}\n` +
-            `[${formatDate(now)}]`;
-        const internalId = await Director.broadcastMessage(messageText);
-        await this.recordLog("online", statusData, internalId);
-        this.lastInternalId = internalId;
-        return internalId;
-    }
-
-    static async createBroadcastForLow(statusData) {
-        this.log("Battery low warning (low):", statusData);
-        const now = new Date();
-        const messageText =
-            `⚠️ ${process.env.DEPLOYNAME} — battery low!\n` +
-            `Charge: ${this._fmtVal(statusData.charge, "%")} · Est. runtime: ${this._fmtVal(statusData.runtime, "s")}\n` +
-            `[${formatDate(now)}]`;
-        const internalId = await Director.broadcastMessage(messageText);
-        await this.recordLog("low", statusData, internalId);
-        this.lastInternalId = internalId;
-        return internalId;
-    }
-
-    static async createBroadcastForDown(statusData) {
-        this.log("Battery critical down (down):", statusData);
-        const now = new Date();
-        const messageText =
-            `❌ ${process.env.DEPLOYNAME} — battery critical! Shutdown imminent!\n` +
-            `Charge: ${this._fmtVal(statusData.charge, "%")} · Est. runtime: ${this._fmtVal(statusData.runtime, "s")}\n` +
-            `[${formatDate(now)}]`;
-        const internalId = await Director.broadcastMessage(messageText);
-        await this.recordLog("down", statusData, internalId);
-        this.lastInternalId = internalId;
-        return internalId;
+        statusData.messageText = messageText;
+        await this.recordLog(status, statusData);
     }
 
     static async checkUps() {
-        this.log("Starting UPS check...");
         try {
             const data = await this.getUpsStatus();
-            const statusRaw = (data.status || "").toString().toLowerCase().trim();
+            const statusRaw = (data["ups.status"] || "").toLowerCase();
+            const charge = this._num(data["battery.charge"] ?? data["battery.charge.low"]);
+            const runtime = this._num(data["battery.runtime"] ?? data["battery.runtime.low"]);
+            const inputVoltage = this._num(data["input.voltage"]);
+            const outputVoltage = this._num(data["output.voltage"]);
+            const loadPct = this._num(data["ups.load"]);
 
-            // Определяем состояние по 4 статусам
+            const statusData = { charge, runtime, inputVoltage, outputVoltage, loadPct };
+
+            // Определяем состояние
             let state;
-            if (statusRaw.includes("loss") || statusRaw.includes("ob") || statusRaw.includes("dischrg")) state = "loss";
-            else if (statusRaw.includes("online") || statusRaw.includes("ol")) state = "online";
-            else if (statusRaw.includes("low")) state = "low";
-            else if (statusRaw.includes("down")) state = "down";
-            else state = "online"; // дефолт
-
-            const statusData = {
-                charge: this._parseNumberRaw(data["battery.charge"] ?? data["battery.charge.low"]),
-                runtime: this._parseNumberRaw(data["battery.runtime"] ?? data["battery.runtime.low"]),
-                inputVoltage: this._parseNumberRaw(data["input.voltage"]),
-                outputVoltage: this._parseNumberRaw(data["output.voltage"]),
-                loadPct: this._parseNumberRaw(data["ups.load"]),
-                statusRaw,
-            };
+            if (statusRaw.includes("ob") || statusRaw.includes("dischrg")) state = "loss";
+            else if (statusRaw.includes("ol")) state = "online";
+            else if (charge !== null && charge <= (data["battery.charge.low"] ?? 10)) state = "low";
+            else if (statusRaw.includes("down") || (runtime !== null && runtime <= 0)) state = "down";
+            else state = "online";
 
             this.log("UPS statusData:", statusData, "Computed state:", state);
 
-            // Инициализация lastState
-            if (this.lastState === null) {
-                try {
-                    const lastLog = await prisma.log.findFirst({ where: { type: "ups" }, orderBy: { time: "desc" } });
-                    if (lastLog) this.lastState = lastLog.action;
-                    else this.lastState = state;
-                    this.log("Initialized lastState:", this.lastState, "lastInternalId:", this.lastInternalId);
-                } catch (e) {
-                    this.log("Failed to read last log:", e);
-                    this.lastState = state;
-                }
+            if (this.lastState !== state) {
+                this.log(`State changed: ${this.lastState} -> ${state}`);
+                await this.broadcast(state, statusData);
+            } else {
+                this.log("No state change.");
             }
-
-            // Обработка переходов состояний
-            if (state === "loss" && this.lastState !== "loss") await this.createBroadcastForOutage(statusData);
-            else if (state === "online" && this.lastState === "loss") await this.createBroadcastForRestore(statusData);
-            else if (state === "low" && this.lastState !== "low") await this.createBroadcastForLow(statusData);
-            else if (state === "down" && this.lastState !== "down") await this.createBroadcastForDown(statusData);
-            else this.log("No state change.");
 
             this.lastState = state;
         } catch (err) {
@@ -184,41 +113,14 @@ class UPSWatcher {
     }
 
     static async setup(intervalMs = 5000) {
-        this.log("Setting up UPSWatcher...");
-        try {
-            const probe = await this.getUpsStatus();
-            if (!probe || Object.keys(probe).length === 0) {
-                this.log("Probe returned empty, not starting UPSWatcher");
-                return false;
-            }
-        } catch (err) {
-            this.log("Failed to probe UPS on startup:", err);
-            return false;
-        }
-
-        try {
-            const lastLog = await prisma.log.findFirst({ where: { type: "ups" }, orderBy: { time: "desc" } });
-            if (lastLog) {
-                this.lastState = lastLog.action;
-                this.lastInternalId = lastLog.internalMessageID || null;
-            }
-            this.log("Initial lastState:", this.lastState, "lastInternalId:", this.lastInternalId);
-        } catch (e) {
-            this.log("Failed to read last log (continuing):", e);
-        }
-
-        try {
-            await this.checkUps();
-            this.intervalHandle = setInterval(() => this.checkUps(), intervalMs);
-            this.log("UPSWatcher monitoring started, interval:", intervalMs);
-            return true;
-        } catch (e) {
-            this.log("Failed to start periodic checks:", e);
-            return false;
-        }
+        try { await this.getUpsStatus(); }
+        catch (err) { this.log("Cannot probe UPS:", err); return false; }
+        await this.checkUps();
+        this.intervalHandle = setInterval(() => this.checkUps(), intervalMs);
+        this.log("UPSWatcher monitoring started, interval:", intervalMs);
+        return true;
     }
 }
 
 UPSWatcher.setup();
-
 module.exports = UPSWatcher;
