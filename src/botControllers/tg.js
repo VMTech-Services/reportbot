@@ -408,7 +408,6 @@ bot.action(/.*/, async (ctx) => {
     }
 });
 
-
 bot.telegram.setMyCommands([
     { command: "settings", description: "Settings to set up bot alerts and switch features" },
     { command: "register", description: "Register yourself in bot, usage: /register <username> <password>" },
