@@ -63,7 +63,7 @@ class UPSWatcher {
 
     static async recordLog(action, data = {}) {
         const internalId = this.lastInternalId
-            ? await Director.updateMessage(this.lastInternalId, data.messageText || "")
+            ? await Director.editInternalMessage(this.lastInternalId, data.messageText || "")
             : await Director.broadcastMessage(data.messageText || "");
 
         if (!this.lastInternalId) {
