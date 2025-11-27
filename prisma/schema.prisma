@@ -67,8 +67,8 @@ model Log {
     data   Json?
     time   DateTime @default(now())
 
-    internalMessageID String
-    internalMessage   InternalMessage @relation(fields: [internalMessageID], references: [id])
+    internalMessageID String?
+    internalMessage   InternalMessage? @relation(fields: [internalMessageID], references: [id])
 }
 
 model DailyReport {
