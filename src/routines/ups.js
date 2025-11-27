@@ -6,6 +6,7 @@ const formatDate = require("../scripts/formatDate");
 class UPSWatcher {
     static lastInternalId = null;
     static lastState = null;
+    static lastCharge = null;
     static intervalHandle = null;
 
     static log(...args) {
@@ -18,14 +19,25 @@ class UPSWatcher {
     }
 
     static execUpsCommand(cmd) {
-        this.log("Executing command:", cmd);
         return new Promise((resolve, reject) => {
             exec(cmd, { timeout: 10_000 }, (err, stdout, stderr) => {
                 if (err) return reject(err);
-                if (stderr) this.log("Command stderr:", stderr.trim());
                 resolve(stdout ? stdout.trim() : "");
             });
         });
+    }
+
+    static async getLastLog() {
+        const lastLog = await prisma.log.findFirst({
+            where: { type: "ups" },
+            orderBy: { createdAt: "desc" }
+        });
+        if (lastLog) {
+            this.lastInternalId = lastLog.internalMessageID;
+            const data = lastLog.data || {};
+            this.lastState = lastLog.action;
+            this.lastCharge = data.charge ?? null;
+        }
     }
 
     static async getUpsStatus() {
@@ -50,31 +62,35 @@ class UPSWatcher {
     }
 
     static async recordLog(action, data = {}) {
-        const internalId = await Director.broadcastMessage(data.messageText || "");
-        await prisma.log.create({ data: { type: "ups", action, data, internalMessageID: internalId } });
+        const internalId = this.lastInternalId
+            ? await Director.updateMessage(this.lastInternalId, data.messageText || "")
+            : await Director.broadcastMessage(data.messageText || "");
+
+        if (!this.lastInternalId) {
+            await prisma.log.create({ data: { type: "ups", action, data, internalMessageID: internalId } });
+        } else {
+            await prisma.log.update({
+                where: { internalMessageID: this.lastInternalId },
+                data: { action, data }
+            });
+        }
+
         this.lastInternalId = internalId;
         return internalId;
     }
 
-    static async broadcast(status, statusData) {
-        const now = new Date();
-        let icon, text;
-        switch (status) {
-            case "loss":
-                icon = "🔴"; text = "power outage detected!"; break;
-            case "online":
-                icon = "🟢"; text = "power restored"; break;
-            case "low":
-                icon = "⚠️"; text = "battery low"; break;
-            case "down":
-                icon = "❌"; text = "battery critical! Shutdown imminent"; break;
-        }
-        const messageText = `${icon} ${process.env.DEPLOYNAME} — ${text}\n` +
+    static buildMessage(status, statusData) {
+        const iconMap = { loss: "🔴", online: "🟢", low: "⚠️", down: "❌" };
+        const textMap = {
+            loss: "power outage detected!",
+            online: "power restored",
+            low: "battery low",
+            down: "battery critical! Shutdown imminent"
+        };
+        return `${iconMap[status]} ${process.env.DEPLOYNAME} — ${textMap[status]}\n` +
             `Charge: ${this._fmt(statusData.charge, "%")} · Runtime: ${this._fmt(statusData.runtime, "s")}\n` +
             `Vin: ${this._fmt(statusData.inputVoltage, "V")} · Vout: ${this._fmt(statusData.outputVoltage, "V")} · Load: ${this._fmt(statusData.loadPct, "%")}\n` +
-            `[${formatDate(now)}]`;
-        statusData.messageText = messageText;
-        await this.recordLog(status, statusData);
+            `[${formatDate(new Date())}]`;
     }
 
     static async checkUps() {
@@ -89,7 +105,6 @@ class UPSWatcher {
 
             const statusData = { charge, runtime, inputVoltage, outputVoltage, loadPct };
 
-            // Определяем состояние
             let state;
             if (statusRaw.includes("ob") || statusRaw.includes("dischrg")) state = "loss";
             else if (statusRaw.includes("ol")) state = "online";
@@ -97,27 +112,47 @@ class UPSWatcher {
             else if (statusRaw.includes("down") || (runtime !== null && runtime <= 0)) state = "down";
             else state = "online";
 
-            this.log("UPS statusData:", statusData, "Computed state:", state);
+            if (state === "loss") {
+                if (this.lastState === "loss" || (this.lastState === "online" && this.lastCharge < 100)) {
+                    statusData.messageText = this.buildMessage("loss", statusData);
+                    await this.recordLog("loss", statusData);
+                } else {
+                    this.lastCharge = charge;
+                    statusData.messageText = this.buildMessage("loss", statusData);
+                    await this.recordLog("loss", statusData);
+                }
+                this.lastState = "loss";
+            } else if (state === "online") {
+                statusData.messageText = this.buildMessage("online", statusData);
+                await this.recordLog("online", statusData);
 
-            if (this.lastState !== state) {
-                this.log(`State changed: ${this.lastState} -> ${state}`);
-                await this.broadcast(state, statusData);
-            } else {
-                this.log("No state change.");
+                if (charge >= 100) {
+                    this.lastInternalId = null;
+                    this.lastState = null;
+                    this.lastCharge = null;
+                } else {
+                    this.lastCharge = charge;
+                    this.lastState = "online";
+                }
             }
 
-            this.lastState = state;
+            if (this.lastCharge !== charge) {
+                this.log(`UPS state: ${state}, charge: ${charge}%`);
+            }
+
+            this.lastCharge = charge;
+
         } catch (err) {
             this.log("checkUps error:", err);
         }
     }
 
     static async setup(intervalMs = 5000) {
+        await this.getLastLog();
         try { await this.getUpsStatus(); }
         catch (err) { this.log("Cannot probe UPS:", err); return false; }
         await this.checkUps();
         this.intervalHandle = setInterval(() => this.checkUps(), intervalMs);
-        this.log("UPSWatcher monitoring started, interval:", intervalMs);
         return true;
     }
 }
