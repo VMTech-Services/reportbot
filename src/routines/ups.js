@@ -69,7 +69,7 @@ class UPSWatcher {
         if (!this.lastInternalId) {
             await prisma.log.create({ data: { type: "ups", action, data, internalMessageID: internalId } });
         } else {
-            await prisma.log.update({
+            await prisma.log.updateMany({
                 where: { internalMessageID: this.lastInternalId },
                 data: { action, data }
             });
