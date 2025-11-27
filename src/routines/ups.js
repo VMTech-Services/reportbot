@@ -20,7 +20,7 @@ class UPSWatcher {
         return new Promise((resolve, reject) => {
             exec(cmd, { timeout: 10_000 }, (err, stdout, stderr) => {
                 if (err) return reject(err);
-                resolve(stdout.trim());
+                resolve(stdout ? stdout.trim() : "");
             });
         });
     }
@@ -28,12 +28,14 @@ class UPSWatcher {
     static async getUpsStatus() {
         const upsName = this.getUpsName();
         const statusRaw = await this.execUpsCommand(`upsc ${upsName}`);
-        const lines = statusRaw.split("\n");
+        const lines = statusRaw.split(/\r?\n/);
         const data = {};
         for (const line of lines) {
+            if (!line.includes(":")) continue;
             const [key, ...rest] = line.split(":");
-            if (!key) continue;
-            data[key.trim()] = rest.join(":").trim();
+            const k = key?.trim();
+            const v = rest.join(":").trim();
+            if (k) data[k] = v;
         }
         if (Object.keys(data).length === 0) {
             throw new Error("Empty UPS status returned");
@@ -42,6 +44,7 @@ class UPSWatcher {
     }
 
     static async buildMessageFromLogs(internalMessageID) {
+        if (!internalMessageID) return `No internal message id provided.`;
         const logs = await prisma.log.findMany({
             where: { internalMessageID },
             orderBy: { time: "asc" },
@@ -75,25 +78,65 @@ class UPSWatcher {
         return header + lines.join("\n\n");
     }
 
+    static async editMessageFromLogs(internalId) {
+        if (!internalId) {
+            console.warn("editMessageFromLogs called without internalId");
+            return null;
+        }
+
+        try {
+            const text = await this.buildMessageFromLogs(internalId);
+
+            if (typeof Director.editInternalMessage === "function") {
+                await Director.editInternalMessage(internalId, text);
+            } else {
+                console.warn("Director.editInternalMessage is not a function; cannot edit messages.");
+            }
+
+            return text;
+        } catch (err) {
+            console.error("editMessageFromLogs error:", err);
+            // don't rethrow — we want checkUps to continue running
+            return null;
+        }
+    }
+
     static async recordLog(action, data = {}, internalMessageID = null) {
-        const rec = await prisma.log.create({
-            data: {
-                type: "ups",
-                action,
-                data,
-                internalMessageID,
-            },
-        });
-        return rec;
+        try {
+            const rec = await prisma.log.create({
+                data: {
+                    type: "ups",
+                    action,
+                    data,
+                    internalMessageID,
+                },
+            });
+            return rec;
+        } catch (err) {
+            console.error("recordLog failed:", err);
+            return null;
+        }
+    }
+
+    static _fmtVal(v, suffix = "") {
+        if (v === null || typeof v === "undefined" || v === "") return `N/A`;
+        return `${v}${suffix}`;
     }
 
     static async createBroadcastForOutage(statusData) {
         const now = new Date();
-        const { charge, runtime, inputVoltage, outputVoltage, loadPct } = statusData;
-        const messageText = `🔴 ${process.env.DEPLOYNAME} — power outage detected!\n` +
-            `Charge: ${charge}% · Est. runtime: ${runtime}s\n` +
-            `Vin: ${inputVoltage}V · Vout: ${outputVoltage}V · Load: ${loadPct}%\n` +
+        const charge = statusData.charge ?? "N/A";
+        const runtime = statusData.runtime ?? "N/A";
+        const inputVoltage = statusData.inputVoltage ?? "N/A";
+        const outputVoltage = statusData.outputVoltage ?? "N/A";
+        const loadPct = statusData.loadPct ?? "N/A";
+
+        const messageText =
+            `🔴 ${process.env.DEPLOYNAME} — power outage detected!\n` +
+            `Charge: ${this._fmtVal(charge, "%")} · Est. runtime: ${this._fmtVal(runtime, "s")}\n` +
+            `Vin: ${this._fmtVal(inputVoltage, "V")} · Vout: ${this._fmtVal(outputVoltage, "V")} · Load: ${this._fmtVal(loadPct, "%")}\n` +
             `[${formatDate(now)}]`;
+
         const internalId = await Director.broadcastMessage(messageText);
         await this.recordLog("onbattery", statusData, internalId);
         this.lastInternalId = internalId;
@@ -102,54 +145,89 @@ class UPSWatcher {
 
     static async createBroadcastForRestore(statusData) {
         const now = new Date();
-        const { charge, inputVoltage, outputVoltage } = statusData;
-        const messageText = `🟢 ${process.env.DEPLOYNAME} — power restored\n` +
-            `Charge: ${charge}% · Vin: ${inputVoltage}V · Vout: ${outputVoltage}V\n` +
+        const charge = statusData.charge ?? "N/A";
+        const inputVoltage = statusData.inputVoltage ?? "N/A";
+        const outputVoltage = statusData.outputVoltage ?? "N/A";
+
+        const messageText =
+            `🟢 ${process.env.DEPLOYNAME} — power restored\n` +
+            `Charge: ${this._fmtVal(charge, "%")} · Vin: ${this._fmtVal(inputVoltage, "V")} · Vout: ${this._fmtVal(outputVoltage, "V")}\n` +
             `[${formatDate(now)}]`;
+
         const internalId = await Director.broadcastMessage(messageText);
         await this.recordLog("online", statusData, internalId);
         this.lastInternalId = internalId;
         return internalId;
     }
 
+    static _parseNumberRaw(v) {
+        if (v === undefined || v === null) return null;
+        const s = String(v).trim();
+        const num = parseFloat(s.replace(/[^0-9.\-]/g, ""));
+        return Number.isFinite(num) ? num : null;
+    }
+
     static async checkUps() {
         try {
             const data = await this.getUpsStatus();
 
-            const statusRaw = data.status || "";
-            const tokens = statusRaw.split(/\s+/);
+            const statusRaw = (data.status || "").toString();
+            const tokens = statusRaw
+                .split(/\s+/)
+                .map((t) => t.trim().toUpperCase())
+                .filter(Boolean);
+
             const isOnBattery = tokens.includes("OB") || (tokens.includes("DISCHRG") && !tokens.includes("OL"));
             const state = isOnBattery ? "onbattery" : "online";
 
-            const charge = parseFloat(data["battery.charge"] ?? data["battery.charge.low"] ?? 0) || 0;
-            const runtime = parseFloat(data["battery.runtime"] ?? data["battery.runtime.low"] ?? 0) || 0;
-            const inputVoltage = parseFloat(data["input.voltage"] ?? 0) || 0;
-            const outputVoltage = parseFloat(data["output.voltage"] ?? 0) || 0;
-            const loadPct = parseFloat(data["ups.load"] ?? 0) || 0;
+            const charge = this._parseNumberRaw(data["battery.charge"] ?? data["battery.charge.low"]);
+            const runtime = this._parseNumberRaw(data["battery.runtime"] ?? data["battery.runtime.low"]);
+            const inputVoltage = this._parseNumberRaw(data["input.voltage"]);
+            const outputVoltage = this._parseNumberRaw(data["output.voltage"]);
+            const loadPct = this._parseNumberRaw(data["ups.load"]);
 
-            const statusData = { charge, runtime, inputVoltage, outputVoltage, loadPct };
+            const statusData = { charge, runtime, inputVoltage, outputVoltage, loadPct, statusRaw };
 
+            // init last state from last DB log if needed
             if (this.lastState === null) {
-                const lastLog = await prisma.log.findFirst({
-                    where: { type: "ups" },
-                    orderBy: { time: "desc" },
-                });
-                if (lastLog) {
-                    this.lastState = lastLog.action === "onbattery" ? "onbattery" : "online";
-                    this.lastInternalId = lastLog.internalMessageID || null;
-                } else {
+                try {
+                    const lastLog = await prisma.log.findFirst({
+                        where: { type: "ups" },
+                        orderBy: { time: "desc" },
+                    });
+                    if (lastLog) {
+                        this.lastState = lastLog.action === "onbattery" ? "onbattery" : "online";
+                        this.lastInternalId = lastLog.internalMessageID || null;
+                    } else {
+                        this.lastState = state;
+                    }
+                } catch (e) {
+                    console.error("UPSWatcher: failed to read last log (continuing):", e);
                     this.lastState = state;
                 }
             }
 
+            // transitions
             if (state === "onbattery" && this.lastState !== "onbattery") {
                 await this.createBroadcastForOutage(statusData);
             } else if (state === "online" && this.lastState === "onbattery") {
                 await this.createBroadcastForRestore(statusData);
             } else {
+                // samples / keep-alive updates
                 if (this.lastInternalId) {
-                    await this.recordLog(state + "_sample", statusData, this.lastInternalId);
-                    await this.editMessageFromLogs(this.lastInternalId);
+                    try {
+                        await this.recordLog(state + "_sample", statusData, this.lastInternalId);
+                    } catch (rErr) {
+                        console.error("Failed to record UPS sample log:", rErr);
+                    }
+
+                    try {
+                        // safe edit
+                        await this.editMessageFromLogs(this.lastInternalId);
+                    } catch (e) {
+                        // already handled inside editMessageFromLogs, but keep safe guard
+                        console.error("Failed to edit internal message from logs:", e);
+                    }
                 }
             }
 
