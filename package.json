@@ -12,6 +12,7 @@
     "dependencies": {
         "@prisma/client": "^6.16.2",
         "bcrypt": "^6.0.0",
+        "dockerode": "^4.0.9",
         "dotenv": "^17.2.3",
         "node-nut": "^1.0.3",
         "telegraf": "^4.16.3"
