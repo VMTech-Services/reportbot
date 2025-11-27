@@ -30,7 +30,7 @@ class UPSWatcher {
     static async getLastLog() {
         const lastLog = await prisma.log.findFirst({
             where: { type: "ups" },
-            orderBy: { createdAt: "desc" }
+            orderBy: { time: "desc" }
         });
         if (lastLog) {
             this.lastInternalId = lastLog.internalMessageID;
