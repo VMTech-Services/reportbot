@@ -44,9 +44,9 @@ class UPSWatcher {
         const raw = await this.execUpsCommand(`upsc ${this.getUpsName()}`);
         const data = {};
         raw.split(/\r?\n/).forEach(line => {
-                const [k, ...rest] = line.split(":");
-                if (k) data[k.trim()] = rest.join(":").trim();
-            });
+            const [k, ...rest] = line.split(":");
+            if (k) data[k.trim()] = rest.join(":").trim();
+        });
         if (!Object.keys(data).length) throw new Error("Empty UPS status returned");
         return data;
     }
@@ -82,14 +82,13 @@ class UPSWatcher {
     static buildMessage(status, statusData) {
         const iconMap = { loss: "🔴", online: "🟢", low: "⚠️", down: "❌" };
         const textMap = {
-            loss: "power outage detected",
+            loss: "power outage detected!",
             online: "power restored",
             low: "battery low",
-            down: "battery critical"
+            down: "battery critical! Shutdown imminent"
         };
-
-        return `${iconMap[status]} ${process.env.DEPLOYNAME} — ${textMap[status]}` +
-            `Charge: ${this._fmt(statusData.charge, "%")} · State: ${status}` +
+        return `${iconMap[status]} ${process.env.DEPLOYNAME} — ${textMap[status]}\n` +
+            `Charge: ${this._fmt(statusData.charge, "%")}\n` +
             `[${formatDate(new Date())}]`;
     }
 
@@ -98,6 +97,7 @@ class UPSWatcher {
             const data = await this.getUpsStatus();
             const statusRaw = (data["ups.status"] || "").toLowerCase();
             const charge = this._num(data["battery.charge"] ?? data["battery.charge.low"]);
+            const runtime = this._num(data["battery.runtime"] ?? data["battery.runtime.low"]);
 
             const statusData = { charge };
 
@@ -105,24 +105,39 @@ class UPSWatcher {
             if (statusRaw.includes("ob") || statusRaw.includes("dischrg")) state = "loss";
             else if (statusRaw.includes("ol")) state = "online";
             else if (charge !== null && charge <= (data["battery.charge.low"] ?? 10)) state = "low";
-            else if (statusRaw.includes("down")) state = "down";
+            else if (statusRaw.includes("down") || (runtime !== null && runtime <= 0)) state = "down";
             else state = "online";
 
-            statusData.messageText = this.buildMessage(state, statusData);
-            await this.recordLog(state, statusData);
+            if (state === "loss") {
+                statusData.messageText = this.buildMessage("loss", statusData);
+                await this.recordLog("loss", statusData);
 
-            if (this.lastState !== state || this.lastCharge !== charge) {
-                this.log(`UPS state: ${state}, charge: ${charge}%`);
-            }
+                if (this.lastState !== "loss" || this.lastCharge !== charge) {
+                    this.log(`UPS state: ${state}, charge: ${charge}%`);
+                }
 
-            this.lastState = state;
-            this.lastCharge = charge;
+                this.lastState = "loss";
+                this.lastCharge = charge;
 
-            // Reset internal tracking when fully charged
-            if (charge >= 100) {
-                this.lastInternalId = null;
-                this.lastState = null;
-                this.lastCharge = null;
+            } else if (state === "online") {
+                if (this.lastState === "loss") {
+                    statusData.messageText = this.buildMessage("online", statusData);
+                    await this.recordLog("online", statusData);
+                    this.lastState = "online";
+                    this.lastCharge = charge;
+                }
+
+                if (this.lastState === "online" && charge < 100) {
+                    statusData.messageText = this.buildMessage("online", statusData);
+                    await this.recordLog("online", statusData);
+                    this.lastCharge = charge;
+                }
+
+                if (charge >= 100) {
+                    this.lastInternalId = null;
+                    this.lastState = null;
+                    this.lastCharge = null;
+                }
             }
 
         } catch (err) {
