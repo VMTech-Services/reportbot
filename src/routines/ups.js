@@ -113,24 +113,28 @@ class UPSWatcher {
             else state = "online";
 
             if (state === "loss") {
-                if (!this.lastState || this.lastState === "online") {
-                    statusData.messageText = this.buildMessage("loss", statusData);
-                    await this.recordLog("loss", statusData);
-                } else if (this.lastState === "loss") {
-                    statusData.messageText = this.buildMessage("loss", statusData);
-                    await this.recordLog("loss", statusData);
+                statusData.messageText = this.buildMessage("loss", statusData);
+                await this.recordLog("loss", statusData);
+
+                if (this.lastState !== "loss" || this.lastCharge !== charge) {
+                    this.log(`UPS state: ${state}, charge: ${charge}%`);
                 }
+
                 this.lastState = "loss";
+                this.lastCharge = charge;
+
             } else if (state === "online") {
                 if (this.lastState === "loss") {
                     statusData.messageText = this.buildMessage("online", statusData);
                     await this.recordLog("online", statusData);
                     this.lastState = "online";
+                    this.lastCharge = charge;
                 }
 
                 if (this.lastState === "online" && charge < 100) {
                     statusData.messageText = this.buildMessage("online", statusData);
                     await this.recordLog("online", statusData);
+                    this.lastCharge = charge;
                 }
 
                 if (charge >= 100) {
@@ -140,16 +144,11 @@ class UPSWatcher {
                 }
             }
 
-            if (this.lastCharge != charge || this.lastState != state) {
-                this.log(`UPS state: ${state}, charge: ${charge}%`);
-            }
-
-            this.lastCharge = charge;
-
         } catch (err) {
             this.log("checkUps error:", err);
         }
     }
+    
     
     static async setup(intervalMs = 5000) {
         await this.getLastLog();
