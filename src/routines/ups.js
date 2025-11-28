@@ -140,7 +140,7 @@ class UPSWatcher {
                 }
             }
 
-            if (this.lastCharge !== charge || this.lastState !== state) {
+            if (this.lastCharge != charge || this.lastState != state) {
                 this.log(`UPS state: ${state}, charge: ${charge}%`);
             }
 
