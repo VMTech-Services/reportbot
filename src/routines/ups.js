@@ -9,6 +9,11 @@ class UPSWatcher {
     static lastCharge = null;
     static intervalHandle = null;
 
+    // For estimating time-to-shutdown based on percent drop over time
+    static chargeHistory = []; // { ts: ms, charge: number }
+    static historyWindowMs = 10 * 60 * 1000; // keep last 10 minutes of samples
+    static historyMax = 20; // also cap by count
+
     static log(...args) {
         console.log("[UPSWatcher]", ...args);
     }
@@ -79,6 +84,41 @@ class UPSWatcher {
         return internalId;
     }
 
+    static estimateTimeToShutdown(currentCharge, criticalPercent = 10) {
+        if (currentCharge === null || currentCharge === undefined) return null;
+
+        const now = Date.now();
+        this.chargeHistory = this.chargeHistory.filter(e => (now - e.ts) <= this.historyWindowMs);
+        if (this.chargeHistory.length < 2) return null;
+
+        const oldest = this.chargeHistory[0];
+        const newest = this.chargeHistory[this.chargeHistory.length - 1];
+
+        const deltaPercent = newest.charge - oldest.charge;
+        const deltaSeconds = (newest.ts - oldest.ts) / 1000;
+        if (deltaSeconds <= 0) return null;
+
+        const ratePctPerSec = -deltaPercent / deltaSeconds;
+        if (!(ratePctPerSec > 0)) return null;
+
+        const safeThreshold = criticalPercent;
+        const secondsLeft = (currentCharge - safeThreshold) / ratePctPerSec;
+        if (secondsLeft < 0) return 0;
+        return Math.round(secondsLeft);
+    }
+
+    static formatSeconds(seconds) {
+        if (seconds === null || seconds === undefined) return "N/A";
+        if (!Number.isFinite(seconds)) return "N/A";
+        const sec = Math.max(0, Math.floor(seconds));
+        const h = Math.floor(sec / 3600);
+        const m = Math.floor((sec % 3600) / 60);
+        const s = sec % 60;
+        if (h > 0) return `${h}h ${m}m ${s}s`;
+        if (m > 0) return `${m}m ${s}s`;
+        return `${s}s`;
+    }
+
     static buildMessage(status, statusData) {
         const iconMap = { loss: "🔴", online: "🟢", low: "⚠️", down: "❌" };
         const textMap = {
@@ -87,9 +127,13 @@ class UPSWatcher {
             low: "battery low",
             down: "battery critical! Shutdown imminent"
         };
-        return `${iconMap[status]} ${process.env.DEPLOYNAME} — ${textMap[status]}\n` +
-            `Charge: ${this._fmt(statusData.charge, "%")} · Runtime: ${this._fmt(statusData.runtime, "s")}\n` +
-            `Vin: ${this._fmt(statusData.inputVoltage, "V")} · Vout: ${this._fmt(statusData.outputVoltage, "V")} · Load: ${this._fmt(statusData.loadPct, "%")}\n` +
+
+        const etaText = (statusData.etaSeconds !== undefined && statusData.etaSeconds !== null)
+            ? ` · Est. to shutdown: ${this.formatSeconds(statusData.etaSeconds)}`
+            : "";
+
+        return `${iconMap[status]} ${process.env.DEPLOYNAME} - ${textMap[status]}\n` +
+            `${etaText}\n` +
             `[${formatDate(new Date())}]`;
     }
 
@@ -105,6 +149,23 @@ class UPSWatcher {
 
             const statusData = { charge, runtime, inputVoltage, outputVoltage, loadPct };
 
+            // Update charge history for ETA calculation
+            if (charge !== null) {
+                const now = Date.now();
+                // push only if history empty or charge changed meaningfully
+                const last = this.chargeHistory.length ? this.chargeHistory[this.chargeHistory.length - 1] : null;
+                if (!last || Math.abs(last.charge - charge) >= 0.1) {
+                    this.chargeHistory.push({ ts: now, charge });
+                }
+                // cap length
+                if (this.chargeHistory.length > this.historyMax) this.chargeHistory.shift();
+            }
+
+            // compute ETA based on percent drop; threshold uses battery.charge.low if available
+            const criticalPercent = this._num(data["battery.charge.low"]) ?? 10;
+            const etaSeconds = this.estimateTimeToShutdown(charge, criticalPercent);
+            if (etaSeconds !== null) statusData.etaSeconds = etaSeconds;
+
             let state;
             if (statusRaw.includes("ob") || statusRaw.includes("dischrg")) state = "loss";
             else if (statusRaw.includes("ol")) state = "online";
@@ -117,7 +178,7 @@ class UPSWatcher {
                 await this.recordLog("loss", statusData);
 
                 if (this.lastState !== "loss" || this.lastCharge !== charge) {
-                    this.log(`UPS state: ${state}, charge: ${charge}%`);
+                    this.log(`UPS state: ${state}, charge: ${charge}%`, statusData.etaSeconds ? `eta ${this.formatSeconds(statusData.etaSeconds)}` : "");
                 }
 
                 this.lastState = "loss";
@@ -141,6 +202,7 @@ class UPSWatcher {
                     this.lastInternalId = null;
                     this.lastState = null;
                     this.lastCharge = null;
+                    this.chargeHistory = [];
                 }
             }
 
@@ -148,8 +210,7 @@ class UPSWatcher {
             this.log("checkUps error:", err);
         }
     }
-    
-    
+
     static async setup(intervalMs = 5000) {
         await this.getLastLog();
         try { await this.getUpsStatus(); }
